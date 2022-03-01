@@ -1,0 +1,202 @@
+---
+title: "Data Exploration Project"
+author: "Cameron Sugamura"
+date: "2/25/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Loading Libraries 
+
+```{r}
+library(vtable)
+library(purrr)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(jtools)
+```
+
+# Data Cleaning
+
+```{r}
+flist <- list.files(path = "Lab3_Rawdata",
+                    pattern = "trends_up_to_", full.names = TRUE) %>%
+  map(read_csv) %>%
+  bind_rows()
+
+```
+Standardizing the Google Trends data
+```{r}
+flist <- flist %>%
+  group_by(schname, keyword) %>%
+  mutate(index_std = (index - mean(index,na.rm = TRUE))/sd(index, na.rm = TRUE))
+
+```
+
+Loading Scorecard dataset, Id dataset
+```{r}
+scorecard <- read.csv("Lab3_Rawdata/Most+Recent+Cohorts+(Scorecard+Elements).csv")
+ID <- read.csv("Lab3_Rawdata/id_name_link.csv")
+```
+
+Linking data together, removing duplicate universities
+```{r}
+id_name_link <- ID %>%
+  group_by(schname) %>%
+  mutate(N = n()) %>%
+  filter(N == 1)
+```
+
+Filtering colleges that only offer bachelor programs
+```{r}
+scorecard <- scorecard %>% 
+  filter(PREDDEG == 3, na.rm = TRUE)
+```
+
+Renaming OPEID column to uppercase to standardize column names
+```{r}
+scorecard <- scorecard %>%
+  rename(opeid = OPEID)
+```
+
+Joining together data by schname and opeid
+```{r}
+flist2 <- id_name_link %>%
+  left_join(flist, by = "schname")
+
+joined_data <- inner_join(scorecard, flist2, by = 'opeid')
+```
+
+Returning median earnings of independent college students of 10 years as a dummy variable
+```{r}
+joined_data1 <- joined_data %>%
+  mutate(earnings_level = ifelse("md_earn_wne_p10.REPORTED.EARNINGS" >= 60000, 'high','low'))
+```
+
+Limiting/setting the level of data to one college per month 
+```{r}
+Newdata <- joined_data1 %>%
+  mutate(date = as.Date(str_sub(monthorweek, 1, 10))) %>%
+  group_by(schname, keyword) %>%
+  mutate(index_std = (index_std - mean(index_std, na.rm = TRUE))/sd(index_std, na.rm = TRUE)) %>%
+  group_by(month = floor_date(date, "month"), opeid, md_earn_wne_p10.REPORTED.EARNINGS, earnings_level) %>%
+  summarize(index_std = mean(index_std, na.rm = TRUE))
+```
+
+Removing N/A values
+```{r}
+Newdata <- drop_na(Newdata)
+```
+
+# Regression
+I have chosen to do a regression within an interaction term, where I will be comparing the effects of the policy on student interest in high earning/low earning colleges.
+
+Adding two more dummy variables: the first to equal TRUE when earnings are over 60k, the second to equal TRUE when the date is past the policy launch date (2015-09-12)
+```{r}
+Newdata1 <- Newdata %>%
+  mutate(treated = md_earn_wne_p10.REPORTED.EARNINGS >= 60000, post_treatment = month >= 
+           as.Date("2015-09-12"))
+```
+
+Running a regression with index2 on treated and post_treatment.
+In other words, running a regression to find the affect of student interest (or the Google Trends index) on median earnings and the policy launch date.
+```{r}
+regression <- lm(index_std ~ treated * post_treatment, data = Newdata1)
+export_summs(regression, digits = 2)
+```
+Interpretation: Here we see after the release of the scorecard, the 'high-earnings' colleges were -.05 of standard deviation  more likely to get student interest.
+The before to after difference is .05 different between the treated and untreated group, specifically 0.5 more negative in the treated group. 
+
+# Visualization
+Further organization of the data to retrieve a single data point per month, per earnings level. Summarizing the index searches by median.
+```{r}
+Newdata2 <- Newdata1 %>%
+  group_by(month, treated) %>%
+  summarise(index_std_median = median(index_std, na.rm = TRUE))
+```
+
+
+Here we are visualize the Google trends index searches by month for both categories of 'low-earning' and 'high-earning' colleges. 
+
+We are viewing the month (on the x-axis) by the Median index searches (y-axis) with both types of earnings present in the legend.
+
+The black line represents the policy launch date of September 12, 2015. Everything on the left side of the black line is before the policy launch date while everything to the right is after.
+```{r}
+ggplot(data = Newdata2, aes(x = month, y = index_std_median, color = treated)) + 
+  geom_line() +
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_rect(fill = "white", colour = "black"),
+        plot.background = element_rect(fill = "aliceblue")) +
+  labs(x = "Month") +
+  labs(y = "Median index searches") + 
+  ggtitle("Google Trends Index by Year per Earnings Level") +
+  labs(x = "Year") +
+  scale_color_discrete(name = "Earnings level", labels = c("Low", "High")) +
+  geom_vline(xintercept = as.numeric(as.Date("2015-09-01")),
+             size = 1,
+             color = "black",
+             alpha = 0.5)
+```
+
+
+From the above visualization, we can see there is a distinct seasonal pattern that repeats every year. Aside from this, we also see that Google search index for the earnings level of low colleges has a larger median range than Google index searches for high earning colleges.
+After the implementation of the policy, 
+seasonal pattern,
+control for seasonal by getting rid of year and only including month
+
+```{r}
+Newdata3 <- Newdata2 %>%
+  group_by(month) %>%
+  mutate(monthonly = month(month)) %>%
+  group_by(monthonly) %>%
+  mutate(index_deseasonlized = index_std_median - mean(index_std_median))
+
+```
+
+```{r}
+ggplot(data = Newdata3, aes(x = month, y = index_deseasonlized, color = treated)) + 
+  geom_line() +
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_rect(fill = "white", colour = "black"),
+        plot.background = element_rect(fill = "aliceblue")) +
+  labs(x = "Month") +
+  labs(y = "Median index searches") + 
+  ggtitle("Google Trends Index by Month per Earnings Level") +
+  scale_color_discrete(name = "Earnings level", labels = c("Low", "High")) +
+  geom_vline(xintercept = as.numeric(as.Date("2015-09-01")),
+             size = 1,
+             color = "black",
+             alpha = 0.5)
+```
+Now that we have controlled for year, we see straighter representations of low and high earnings among median index searches and month. It is apparent that there is a downward sloping trend among both earning levels although this is not extremely important, as we are able to find the distinction between low and high earning colleges which is what we really want to find.
+
+Turning the 'monthonly' variable into a factor from the original regression data set so that we can view the regression with year controlled.
+```{r}
+Newdata4 <- Newdata1 %>%
+  group_by(month) %>%
+  mutate(monthonly = factor(month(month)))
+```
+
+Viewing the original regression except with the 'monthonly' variable as a control (the year as a control).
+```{r}
+regression1 <- lm(index_std ~ treated * post_treatment + monthonly, data = Newdata4)
+export_summs(regression1, digits = 2)
+```
+
+Interpretation: 
+We can see that ultimately the findings are the same. 
+This suggests that even with year controlled, the before-to-after difference remains 0.05.
+
+# Conclusion
+Our findings were not as expected. From the two visuals we see that the launch of the scorecard did not have any substantial effect on Google index searches for high or low earning colleges. To our surprise, we see that low earning colleges have a larger range and a higher search rate after the scorecard launch. 
